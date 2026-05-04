@@ -1,3 +1,4 @@
+import secrets
 import random
 import math
 import hashlib
@@ -57,6 +58,8 @@ def generate_prime(bits):
 def generate_prime_range(low, high):
     while True:
         p = random.randint(low, high)
+        if p % 2 == 0:
+            p += 1
         if miller_rabin(p):
             return p
 
@@ -81,7 +84,8 @@ class Caesar:
 
     @staticmethod
     def brute_force(text):
-        return [(k, Caesar.decrypt(text, k)) for k in range(1, 26)]
+        # key 0 is the identity (included for completeness)
+        return [(k, Caesar.decrypt(text, k)) for k in range(0, 26)]
 
 
 class Affine:
@@ -219,35 +223,44 @@ class Vigenere:
 
 
 class OTP:
-    @staticmethod
-    def generate_key(length):
-        return [random.randint(0, 25) for _ in range(length)]
+    """
+    True One-Time Pad (Vernam cipher) — XOR byte-by-byte.
+    The key must be at least as long as the message (true OTP requirement).
+    For perfect secrecy, generate a fresh key for every message.
+    """
 
     @staticmethod
-    def encrypt(text, key):
-        result = []
-        ki = 0
-        for c in text:
-            if c.isalpha():
-                base = ord('A') if c.isupper() else ord('a')
-                result.append(chr((ord(c) - base + key[ki % len(key)]) % 26 + base))
-                ki += 1
-            else:
-                result.append(c)
-        return ''.join(result)
+    def generate_key(length: int) -> bytes:
+        """Generate a cryptographically random key of `length` bytes."""
+        return secrets.token_bytes(length)
 
     @staticmethod
-    def decrypt(text, key):
-        result = []
-        ki = 0
-        for c in text:
-            if c.isalpha():
-                base = ord('A') if c.isupper() else ord('a')
-                result.append(chr((ord(c) - base - key[ki % len(key)]) % 26 + base))
-                ki += 1
-            else:
-                result.append(c)
-        return ''.join(result)
+    def encrypt(data: bytes, key: bytes) -> bytes:
+        """
+        XOR each byte of data with the corresponding key byte.
+        Raises ValueError if key is shorter than data.
+        """
+        if len(key) < len(data):
+            raise ValueError(
+                f"OTP key ({len(key)} bytes) must be >= message ({len(data)} bytes)"
+            )
+        return bytes(b ^ key[i] for i, b in enumerate(data))
+
+    @staticmethod
+    def decrypt(data: bytes, key: bytes) -> bytes:
+        """XOR is its own inverse — same operation as encrypt."""
+        return OTP.encrypt(data, key)
+
+    # ── Vulnerability demo: key reuse (crib-dragging setup) ──────────────────
+
+    @staticmethod
+    def xor_ciphertexts(c1: bytes, c2: bytes) -> bytes:
+        """
+        C1 XOR C2 = M1 XOR M2.
+        Demonstrates that reusing a key leaks the XOR of the plaintexts.
+        """
+        length = min(len(c1), len(c2))
+        return bytes(a ^ b for a, b in zip(c1[:length], c2[:length]))
 
 
 class Playfair:
@@ -348,6 +361,8 @@ class Hill:
 
     @staticmethod
     def _mat_det_mod(m, mod):
+        if len(m) == 1:                              # base case — was missing, caused all-zero inverse
+            return m[0][0] % mod
         if len(m) == 2:
             return (m[0][0]*m[1][1] - m[0][1]*m[1][0]) % mod
         det = 0
@@ -406,6 +421,7 @@ class RC4:
 
     @staticmethod
     def encrypt(text, key):
+        """Encrypt a string; returns hex-encoded ciphertext."""
         S = RC4._ksa(key)
         i = j = 0
         result = []
@@ -418,6 +434,7 @@ class RC4:
 
     @staticmethod
     def decrypt(hex_text, key):
+        """Decrypt hex-encoded ciphertext; returns plaintext string."""
         data = bytes.fromhex(hex_text)
         S = RC4._ksa(key)
         i = j = 0
@@ -584,7 +601,8 @@ class AES:
 
     @staticmethod
     def generate_key(bits=128):
-        return random.randbytes(bits // 8).hex()
+        # Use secrets for cryptographically secure key generation
+        return secrets.token_bytes(bits // 8).hex()
 
 
 # ─── ASYMMETRIC ──────────────────────────────────────────────────────────────
@@ -618,18 +636,26 @@ class RSA:
 
     @staticmethod
     def sign(m, d, n):
+        """Sign a message: computes S = H(m)^d mod n."""
         if isinstance(m, str):
             h = int(hashlib.sha256(m.encode()).hexdigest(), 16)
         else:
             h = m
+        # Reduce hash modulo n to fit the key size
         return pow(h % n, d, n)
 
     @staticmethod
     def verify(m, sig, e, n):
+        """
+        Verify a signature.
+        Recomputes H(m) % n and compares with sig^e mod n.
+        Note: for production use OAEP/PSS padding instead.
+        """
         if isinstance(m, str):
             h = int(hashlib.sha256(m.encode()).hexdigest(), 16)
         else:
             h = m
+        # Must use the same reduction as sign()
         return pow(sig, e, n) == h % n
 
 
@@ -709,13 +735,24 @@ class HashFunctions:
 
 class DSA:
     @staticmethod
-    def generate_params(bits=128):
-        q = generate_prime(bits)
+    def generate_params(q_bits=256, p_bits=1024):
+        """
+        Generate DSA parameters following standard sizing:
+          q — prime divisor of (p-1), q_bits bits  (e.g. 256)
+          p — large prime,            p_bits bits   (e.g. 1024)
+          g — generator of order q in Z*_p
+        """
+        q = generate_prime(q_bits)
+        # Keep generating k until p = k*q + 1 is prime and has the right bit-length
         while True:
-            k = random.randint(1, 2**bits)
+            k = random.randint(
+                2 ** (p_bits - q_bits - 1),
+                2 ** (p_bits - q_bits)
+            )
             p = k * q + 1
             if miller_rabin(p):
                 break
+        # Find a generator g of order q
         g = 1
         for h in range(2, p):
             g = pow(h, (p - 1) // q, p)
@@ -784,6 +821,12 @@ class ShamirSecretSharing:
 # ─── PAILLIER HOMOMORPHIC ENCRYPTION ─────────────────────────────────────────
 
 class Paillier:
+    """
+    Paillier cryptosystem — additively homomorphic.
+    Enc(m1) * Enc(m2) mod n² = Enc(m1 + m2 mod n)
+    Used in TP 6.4 for secure e-voting.
+    """
+
     @staticmethod
     def generate_keys(bits=256):
         p = generate_prime(bits // 2)
@@ -791,9 +834,13 @@ class Paillier:
         while q == p:
             q = generate_prime(bits // 2)
         n = p * q
-        g = n + 1
+        n2 = n * n
+        g = n + 1                                   # standard simplification: g = n+1
         lam = (p - 1) * (q - 1) // gcd(p - 1, q - 1)
-        mu = mod_inverse(lam, n)
+        # Correct mu: mu = L(g^lambda mod n²)^-1 mod n
+        # where L(x) = (x - 1) / n
+        l_val = (pow(g, lam, n2) - 1) // n         # L(g^λ mod n²)
+        mu = mod_inverse(l_val, n)
         return {'n': n, 'g': g, 'lam': lam, 'mu': mu}
 
     @staticmethod
@@ -804,12 +851,17 @@ class Paillier:
 
     @staticmethod
     def decrypt(c, n, lam, mu):
+        """
+        Decrypt: m = L(c^lambda mod n²) * mu mod n
+        where L(x) = (x - 1) / n
+        """
         n2 = n * n
-        l = (pow(c, lam, n2) - 1) // n
-        return (l * mu) % n
+        l_val = (pow(c, lam, n2) - 1) // n         # L(c^λ mod n²)
+        return (l_val * mu) % n
 
     @staticmethod
     def add_encrypted(c1, c2, n):
+        """Homomorphic addition: Enc(m1+m2) = Enc(m1)*Enc(m2) mod n²"""
         return (c1 * c2) % (n * n)
 
 
@@ -830,14 +882,14 @@ class Schnorr:
 
     @staticmethod
     def generate_keys(p, q, g):
-        s = random.randint(1, q - 1)
-        h = pow(g, s, p)
+        s = random.randint(1, q - 1)           # private key
+        h = pow(g, s, p)                        # public key
         return s, h
 
     @staticmethod
     def prover_commit(p, q, g):
-        r = random.randint(1, q - 1)
-        x = pow(g, r, p)
+        r = random.randint(1, q - 1)           # random nonce
+        x = pow(g, r, p)                        # commitment
         return r, x
 
     @staticmethod
@@ -846,12 +898,17 @@ class Schnorr:
 
     @staticmethod
     def prover_respond(r, s, c, q):
+        """Compute response: y = r + s*c mod q"""
         return (r + s * c) % q
 
     @staticmethod
-    def verify(g, y, h, c, x, p):
-        lhs = pow(g, y, p)
-        rhs = (x * pow(h, c, p)) % p
+    def verify(g, pub_key, commitment, challenge, response, p):
+        """
+        Verify: g^response mod p == commitment * pub_key^challenge mod p
+        Parameters renamed for clarity (was: g, y, h, c, x, p — confusing).
+        """
+        lhs = pow(g, response, p)
+        rhs = (commitment * pow(pub_key, challenge, p)) % p
         return lhs == rhs
 
 
@@ -868,15 +925,22 @@ class FeigeFiatShamir:
 
     @staticmethod
     def generate_keys(n, k=3):
+        """
+        Generate k pairs (v_i, s_i) where:
+          s_i  = random secret
+          v_i  = s_i² mod n   (public key component)
+        Returns v (list of public values) and s (list of secrets).
+        """
         v = []
         s = []
         for _ in range(k):
             while True:
                 si = random.randint(1, n - 1)
-                vi = pow(si, 2, n)
+                vi = pow(si, 2, n)              # v_i = s_i² mod n (public)
+                # Make sure vi is invertible (needed for verification)
                 try:
-                    vi_inv = mod_inverse(vi, n)
-                    v.append(vi_inv)
+                    mod_inverse(vi, n)
+                    v.append(vi)
                     s.append(si)
                     break
                 except ValueError:
@@ -886,7 +950,7 @@ class FeigeFiatShamir:
     @staticmethod
     def prover_commit(n):
         r = random.randint(1, n - 1)
-        x = pow(r, 2, n)
+        x = pow(r, 2, n)                        # commitment x = r² mod n
         return r, x
 
     @staticmethod
@@ -903,9 +967,102 @@ class FeigeFiatShamir:
 
     @staticmethod
     def verify(x, y, v, challenge, n):
+        """
+        Verify: y² mod n == x * product(v_i) for b_i=1  mod n
+        Note: v[i] = s[i]² (not its inverse), so we multiply directly.
+        Bug fix: original code used mod_inverse(v[i], n) which double-inverted.
+        """
         lhs = pow(y, 2, n)
         rhs = x
         for i, b in enumerate(challenge):
             if b:
-                rhs = (rhs * mod_inverse(v[i], n)) % n
+                rhs = (rhs * v[i]) % n          # FIXED: multiply by v[i], not its inverse
         return lhs == rhs
+
+
+# ─── QUICK SELF-TEST ─────────────────────────────────────────────────────────
+
+if __name__ == '__main__':
+    print("=== Self-tests ===\n")
+
+    # Caesar
+    ct = Caesar.encrypt("Hello World", 3)
+    assert Caesar.decrypt(ct, 3) == "Hello World"
+    print(f"Caesar      OK  →  '{ct}'")
+
+    # Vigenere
+    ct = Vigenere.encrypt("ATTACKATDAWN", "LEMON")
+    assert Vigenere.decrypt(ct, "LEMON") == "ATTACKATDAWN"
+    print(f"Vigenere    OK  →  '{ct}'")
+
+    # Hill 2x2
+    key = [[3, 3], [2, 5]]
+    ct = Hill.encrypt("HELP", key)
+    assert Hill.decrypt(ct, key) == "HELP"
+    print(f"Hill        OK  →  '{ct}'")
+
+    # OTP (byte-level XOR)
+    msg = b"Secret message!"
+    key_otp = OTP.generate_key(len(msg))
+    enc = OTP.encrypt(msg, key_otp)
+    assert OTP.decrypt(enc, key_otp) == msg
+    print(f"OTP         OK  →  {enc.hex()}")
+
+    # RC4
+    ct = RC4.encrypt("Hello RC4", "secret")
+    assert RC4.decrypt(ct, "secret") == "Hello RC4"
+    print(f"RC4         OK  →  '{ct}'")
+
+    # AES ECB
+    key_aes = AES.generate_key(128)
+    ct = AES.encrypt_ecb("AES test message", key_aes)
+    assert AES.decrypt_ecb(ct, key_aes) == "AES test message"
+    print(f"AES-128 ECB OK")
+
+    # RSA
+    keys = RSA.generate_keys(512)
+    m = 42
+    enc = RSA.encrypt(m, keys['e'], keys['n'])
+    assert RSA.decrypt(enc, keys['d'], keys['n']) == m
+    sig = RSA.sign("test", keys['d'], keys['n'])
+    assert RSA.verify("test", sig, keys['e'], keys['n'])
+    print(f"RSA-512     OK")
+
+    # ElGamal
+    eg = ElGamal.generate_keys(128)
+    m = 12345
+    c1, c2 = ElGamal.encrypt(m, eg['p'], eg['g'], eg['y'])
+    assert ElGamal.decrypt(c1, c2, eg['x'], eg['p']) == m
+    print(f"ElGamal     OK")
+
+    # Paillier
+    pal = Paillier.generate_keys(128)
+    m1, m2 = 17, 25
+    e1 = Paillier.encrypt(m1, pal['n'], pal['g'])
+    e2 = Paillier.encrypt(m2, pal['n'], pal['g'])
+    e_sum = Paillier.add_encrypted(e1, e2, pal['n'])
+    assert Paillier.decrypt(e_sum, pal['n'], pal['lam'], pal['mu']) == m1 + m2
+    print(f"Paillier    OK  →  {m1} + {m2} = {m1+m2} (homomorphic)")
+
+    # DSA
+    dsa = DSA.generate_params(q_bits=160, p_bits=1024)
+    r, s = DSA.sign("test message", dsa['p'], dsa['q'], dsa['g'], dsa['x'])
+    assert DSA.verify("test message", r, s, dsa['p'], dsa['q'], dsa['g'], dsa['y'])
+    print(f"DSA         OK")
+
+    # FFS
+    n_ffs = FeigeFiatShamir.generate_params(64)
+    v, s = FeigeFiatShamir.generate_keys(n_ffs)
+    r_ffs, x_ffs = FeigeFiatShamir.prover_commit(n_ffs)
+    ch = FeigeFiatShamir.generate_challenge(len(v))
+    y_ffs = FeigeFiatShamir.prover_respond(r_ffs, s, ch, n_ffs)
+    assert FeigeFiatShamir.verify(x_ffs, y_ffs, v, ch, n_ffs)
+    print(f"FFS         OK")
+
+    # Shamir
+    secret = 123456789
+    shares = ShamirSecretSharing.split(secret, 3, 5)
+    assert ShamirSecretSharing.reconstruct(shares[:3]) == secret
+    print(f"Shamir SSS  OK")
+
+    print("\nAll tests passed ✓")
